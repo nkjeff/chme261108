@@ -37,9 +37,11 @@ public class MainActivity extends Activity {
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
     private ScaleGestureDetector scaleDetector;
     private String activeTag="全部", sortField="添加时间", searchText="";
-    private boolean descending=true, selecting=false, dragSelecting=false;
+    private boolean descending=true, selecting=false, dragSelecting=false, pinchInProgress=false;
+    private String dragStartedKey=null;
     private float pinchFactor=1f;
     private int columns=4;
+    private long lastColumnStepAt=0;
     private long queryGeneration=0;
     private final LinkedHashSet<String> pendingDelete=new LinkedHashSet<>();
 
@@ -118,7 +120,7 @@ public class MainActivity extends Activity {
         // The Android system status bar is the first persistent row.
         toolRow=horizontal();
         toolRow.setBackgroundColor(BLACK);
-        root.addView(toolRow,new LinearLayout.LayoutParams(-1,dp(48)));
+        root.addView(toolRow,new LinearLayout.LayoutParams(-1,dp(38)));
         addTool("⟳", "刷新", this::refreshMedia);
         addTool(sortField, "排序字段", this::switchSortField);
         addTool(descending?"↓":"↑", "排序方向", this::switchDirection);
@@ -128,7 +130,7 @@ public class MainActivity extends Activity {
         tabScroll.setFillViewport(false);
         tabRow=horizontal();
         tabScroll.addView(tabRow,new HorizontalScrollView.LayoutParams(-2,-1));
-        root.addView(tabScroll,new LinearLayout.LayoutParams(-1,dp(44)));
+        root.addView(tabScroll,new LinearLayout.LayoutParams(-1,dp(52)));
 
         grid=new GridView(this);
         grid.setBackgroundColor(BLACK);
@@ -155,31 +157,72 @@ public class MainActivity extends Activity {
             else openInSystemGallery(item);
         });
         grid.setOnItemLongClickListener((parent,view,position,id)->{
-            if(position>=0&&position<media.size()) {
-                selecting=true; dragSelecting=true;
-                selected.add(media.get(position).key);
-                refreshSelectionBar(); adapter.notifyDataSetChanged();
-            }
+            if(pinchInProgress || position<0 || position>=media.size()) return true;
+            selecting=true;
+            dragSelecting=true;
+            dragStartedKey=media.get(position).key;
+            selected.add(dragStartedKey);
+            refreshSelectionBar();
+            adapter.notifyDataSetChanged();
             return true;
+        });
+        scaleDetector=new ScaleGestureDetector(this,new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            @Override public boolean onScaleBegin(ScaleGestureDetector detector) {
+                pinchInProgress=true;
+                dragSelecting=false;
+                dragStartedKey=null;
+                return true;
+            }
+            @Override public boolean onScale(ScaleGestureDetector detector) {
+                pinchFactor*=detector.getScaleFactor();
+                long now=android.os.SystemClock.uptimeMillis();
+                if(now-lastColumnStepAt<65) return true;
+                // Spread: fewer columns. Pinch: more columns.
+                if(pinchFactor>=1.045f) {
+                    changeColumns(-1); pinchFactor=1f; lastColumnStepAt=now;
+                } else if(pinchFactor<=0.955f) {
+                    changeColumns(1); pinchFactor=1f; lastColumnStepAt=now;
+                }
+                return true;
+            }
+            @Override public void onScaleEnd(ScaleGestureDetector detector) {
+                pinchInProgress=false;
+                pinchFactor=1f;
+            }
         });
         grid.setOnTouchListener((v,event)->{
             scaleDetector.onTouchEvent(event);
-            if(event.getAction()==MotionEvent.ACTION_MOVE && selecting && dragSelecting) {
-                int p=grid.pointToPosition((int)event.getX(),(int)event.getY());
-                if(p>=0&&p<media.size()&&selected.add(media.get(p).key)) {
-                    adapter.notifyDataSetChanged(); refreshSelectionBar();
+            int action=event.getActionMasked();
+            if(action==MotionEvent.ACTION_POINTER_DOWN) {
+                pinchInProgress=true;
+                if(dragSelecting && dragStartedKey!=null) {
+                    selected.remove(dragStartedKey);
+                    dragStartedKey=null;
+                    dragSelecting=false;
+                    adapter.notifyDataSetChanged();
+                    refreshSelectionBar();
                 }
-            }
-            if(event.getAction()==MotionEvent.ACTION_UP || event.getAction()==MotionEvent.ACTION_CANCEL) dragSelecting=false;
-            return false;
-        });
-        scaleDetector=new ScaleGestureDetector(this,new ScaleGestureDetector.SimpleOnScaleGestureListener() {
-            @Override public boolean onScale(ScaleGestureDetector detector) {
-                pinchFactor*=detector.getScaleFactor();
-                if(pinchFactor>1.32f) { changeColumns(1); pinchFactor=1f; }
-                else if(pinchFactor<0.76f) { changeColumns(-1); pinchFactor=1f; }
                 return true;
             }
+            if(event.getPointerCount()>1 || pinchInProgress) {
+                if(action==MotionEvent.ACTION_UP || action==MotionEvent.ACTION_CANCEL) {
+                    pinchInProgress=false;
+                    dragSelecting=false;
+                }
+                return true;
+            }
+            if(action==MotionEvent.ACTION_MOVE && selecting && dragSelecting) {
+                int p=grid.pointToPosition((int)event.getX(),(int)event.getY());
+                if(p>=0&&p<media.size()&&selected.add(media.get(p).key)) {
+                    adapter.notifyDataSetChanged();
+                    refreshSelectionBar();
+                }
+            }
+            if(action==MotionEvent.ACTION_UP || action==MotionEvent.ACTION_CANCEL) {
+                dragSelecting=false;
+                dragStartedKey=null;
+            }
+            return false;
         });
     }
 
@@ -201,13 +244,15 @@ public class MainActivity extends Activity {
     }
     private void switchDirection() { descending=!descending; updateToolText(); refreshMedia(); }
     private void changeColumns(int delta) {
-        int index=columns==4?0:columns==8?1:2;
-        index=Math.max(0,Math.min(2,index+delta));
-        int next=new int[]{4,8,16}[index];
+        int next=Math.max(4,Math.min(16,columns+delta));
         if(next==columns) return;
         columns=next;
-        grid.setNumColumns(columns);
-        adapter.notifyDataSetChanged();
+        grid.animate().cancel();
+        grid.animate().alpha(0.72f).setDuration(55).withEndAction(()->{
+            grid.setNumColumns(columns);
+            adapter.notifyDataSetChanged();
+            grid.animate().alpha(1f).setDuration(85).start();
+        }).start();
     }
 
     private void readCustomTags() {
