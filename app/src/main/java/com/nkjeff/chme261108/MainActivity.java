@@ -4,7 +4,6 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ContentUris;
-import android.content.ContentValues;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
@@ -408,13 +407,14 @@ public class MainActivity extends Activity {
 
     private void openMedia(MediaItem item) {
         try {
-            Intent intent=new Intent(Intent.ACTION_VIEW);
-            intent.setDataAndType(item.uri,item.video?"video/*":"image/*");
+            Intent intent=new Intent(this,MediaViewerActivity.class);
+            intent.putExtra("media_uri",item.uri.toString());
+            intent.putExtra("media_video",item.video);
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             startActivity(intent);
             overridePendingTransition(0,0);
         } catch(Exception error) {
-            Toast.makeText(this,"没有可打开此媒体的应用",Toast.LENGTH_SHORT).show();
+            Toast.makeText(this,"无法打开媒体文件",Toast.LENGTH_SHORT).show();
         }
     }
 
