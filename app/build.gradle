@@ -4,10 +4,10 @@ android {
     namespace 'com.nkjeff.chme261108'
     compileSdk 35
     defaultConfig {
-        applicationId 'com.nkjeff.chme261108.t20261108193949'
+        applicationId 'com.nkjeff.chme261108.t20261108201016'
         minSdk 26
         targetSdk 34
-        versionCode 2026110819
-        versionName '20261108193949'
+        versionCode 2026110820
+        versionName '20261108201016'
     }
 }
