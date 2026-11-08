@@ -8,6 +8,6 @@ android {
         minSdk 26
         targetSdk 34
         versionCode 20261108
-        versionName '0.1.0-20261108170422'
+        versionName '0.1.0-20261108170453'
     }
 }
