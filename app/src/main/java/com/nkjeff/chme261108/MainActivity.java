@@ -34,7 +34,8 @@ public class MainActivity extends Activity {
     private String activeTag="全部", sortMode="添加时间", filterQuery="";
     private int sortDirection=0, columns=4;
     private boolean selecting=false;
-    private static final int REQ_MEDIA=100, REQ_TRASH=101, REQ_DELETE=102;
+    private static final int REQ_MEDIA=100, REQ_DELETE=102;
+    private final LinkedHashSet<String> pendingDeleteIds=new LinkedHashSet<>();
 
     static class MediaItem {
         long id, date, size;
@@ -303,13 +304,10 @@ public class MainActivity extends Activity {
             }
 
             if(Build.VERSION.SDK_INT>=30) {
-                selection.append(" AND ").append(MediaStore.MediaColumns.IS_TRASHED).append("=?");
-                args.add(tag.equals("最近删除")?"1":"0");
-            } else if(tag.equals("最近删除")) {
-                runOnUiThread(()->{items.clear();adapter.notifyDataSetChanged();});
-                return;
+                selection.append(" AND ").append(MediaStore.MediaColumns.IS_TRASHED).append("=0");
             }
 
+            Set<String> appTrash=getSharedPreferences("app_trash",0).getStringSet("ids",new HashSet<>());
             if(!query.isEmpty()) {
                 selection.append(" AND ").append(MediaStore.Files.FileColumns.DISPLAY_NAME).append(" LIKE ?");
                 args.add("%"+query+"%");
@@ -322,8 +320,10 @@ public class MainActivity extends Activity {
                     long id=cursor.getLong(0), date=cursor.getLong(1), size=cursor.getLong(2);
                     int type=cursor.getInt(3);
                     boolean video=type==MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO;
+                    boolean trashed=appTrash.contains(String.valueOf(id));
+                    if(tag.equals("最近删除")!=trashed) continue;
                     Uri uri=ContentUris.withAppendedId(video?MediaStore.Video.Media.EXTERNAL_CONTENT_URI:MediaStore.Images.Media.EXTERNAL_CONTENT_URI,id);
-                    result.add(new MediaItem(id,date,size,video,tag.equals("最近删除"),uri));
+                    result.add(new MediaItem(id,date,size,video,trashed,uri));
                 }
             } catch(Exception error) {
                 android.util.Log.e("MediaManager","Media query failed",error);
@@ -377,30 +377,47 @@ public class MainActivity extends Activity {
         return uris;
     }
     private void changeTrashState(boolean trash) {
-        ArrayList<Uri> uris=selectedUris();
-        if(uris.isEmpty()) return;
-        if(Build.VERSION.SDK_INT>=30) {
-            try {
-                IntentSenderRequestCompat.launch(this,trash?MediaStore.createTrashRequest(getContentResolver(),uris,true):MediaStore.createTrashRequest(getContentResolver(),uris,false),REQ_TRASH);
-            } catch(Exception error) {
-                Toast.makeText(this,"无法发起媒体授权："+error.getMessage(),Toast.LENGTH_LONG).show();
-            }
-        } else {
-            Toast.makeText(this,"此 Android 版本不支持系统最近删除回收箱",Toast.LENGTH_LONG).show();
+        android.content.SharedPreferences prefs=getSharedPreferences("app_trash",0);
+        Set<String> ids=new HashSet<>(prefs.getStringSet("ids",new HashSet<>()));
+        for(Long id:selected) {
+            if(trash) ids.add(String.valueOf(id)); else ids.remove(String.valueOf(id));
         }
+        prefs.edit().putStringSet("ids",ids).apply();
+        selected.clear(); selecting=false; refreshSelectionBar(); loadMedia();
     }
+
     private void permanentlyDelete() {
         ArrayList<Uri> uris=selectedUris();
         if(uris.isEmpty()) return;
+        pendingDeleteIds.clear();
+        for(Long id:selected) pendingDeleteIds.add(String.valueOf(id));
         if(Build.VERSION.SDK_INT>=30) {
             try { IntentSenderRequestCompat.launch(this,MediaStore.createDeleteRequest(getContentResolver(),uris),REQ_DELETE); }
-            catch(Exception error) { Toast.makeText(this,"无法发起删除授权："+error.getMessage(),Toast.LENGTH_LONG).show(); }
-        } else Toast.makeText(this,"此 Android 版本不支持此操作",Toast.LENGTH_LONG).show();
+            catch(Exception error) { pendingDeleteIds.clear(); Toast.makeText(this,"无法发起删除授权："+error.getMessage(),Toast.LENGTH_LONG).show(); }
+        } else {
+            Toast.makeText(this,"Android 10 及更早版本的永久删除授权尚未实现",Toast.LENGTH_LONG).show();
+            pendingDeleteIds.clear();
+        }
     }
 
     @Override protected void onActivityResult(int requestCode,int resultCode,Intent data) {
         super.onActivityResult(requestCode,resultCode,data);
-        if(requestCode==REQ_TRASH||requestCode==REQ_DELETE) {
+        if(requestCode==REQ_DELETE) {
+            if(resultCode==RESULT_OK) {
+                android.content.SharedPreferences trashPrefs=getSharedPreferences("app_trash",0);
+                Set<String> ids=new HashSet<>(trashPrefs.getStringSet("ids",new HashSet<>()));
+                ids.removeAll(pendingDeleteIds);
+                trashPrefs.edit().putStringSet("ids",ids).apply();
+                android.content.SharedPreferences tagPrefs=getSharedPreferences("media_tags",0);
+                android.content.SharedPreferences.Editor editor=tagPrefs.edit();
+                for(String tag:customTags) {
+                    Set<String> tagIds=new HashSet<>(tagPrefs.getStringSet(tag,new HashSet<>()));
+                    tagIds.removeAll(pendingDeleteIds);
+                    editor.putStringSet(tag,tagIds);
+                }
+                editor.apply();
+            }
+            pendingDeleteIds.clear();
             selected.clear(); selecting=false; refreshSelectionBar(); loadMedia();
         }
     }
