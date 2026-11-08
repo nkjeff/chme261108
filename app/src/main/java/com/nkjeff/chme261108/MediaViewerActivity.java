@@ -16,6 +16,7 @@ import android.widget.VideoView;
 import java.io.InputStream;
 
 public class MediaViewerActivity extends Activity {
+    private boolean barsHidden=true;
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().setStatusBarColor(Color.BLACK);
@@ -54,8 +55,8 @@ public class MediaViewerActivity extends Activity {
             container.addView(image,new FrameLayout.LayoutParams(-1,-1));
             loadImage(uri,image);
             image.setOnClickListener(v->{
-                if(getWindow().getDecorView().getSystemUiVisibility()!=0) hideSystemBars();
-                else showSystemBars();
+                if(barsHidden) { showSystemBars(); barsHidden=false; }
+                else { hideSystemBars(); barsHidden=true; }
             });
         }
     }
