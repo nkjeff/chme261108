@@ -3,18 +3,20 @@ package com.nkjeff.chme261108;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.content.ContentUris;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.MediaStore;
+import android.util.Size;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.*;
@@ -23,466 +25,424 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
-    private final int WHITE=Color.WHITE, GRAY=0xff888888;
-    private LinearLayout root, tabs, toolbar, selectionBar;
+    private static final int BLACK=Color.BLACK, WHITE=Color.WHITE, MUTED=0xff777777;
+    private static final int REQ_MEDIA=40, REQ_DELETE=41;
+    private LinearLayout root, toolRow, tabRow, selectionRow;
+    private HorizontalScrollView tabScroll;
     private GridView grid;
     private MediaAdapter adapter;
-    private final ArrayList<MediaItem> items=new ArrayList<>();
-    private final LinkedHashSet<Long> selected=new LinkedHashSet<>();
+    private final ArrayList<MediaItem> media=new ArrayList<>();
     private final ArrayList<String> customTags=new ArrayList<>();
-    private final ExecutorService executor=Executors.newSingleThreadExecutor();
-    private String activeTag="全部", sortMode="添加时间", filterQuery="";
-    private int sortDirection=0, columns=4;
-    private boolean selecting=false;
-    private static final int REQ_MEDIA=100, REQ_DELETE=102;
-    private final LinkedHashSet<String> pendingDeleteIds=new LinkedHashSet<>();
+    private final LinkedHashSet<String> selected=new LinkedHashSet<>();
+    private final ExecutorService worker=Executors.newSingleThreadExecutor();
+    private ScaleGestureDetector scaleDetector;
+    private String activeTag="全部", sortField="添加时间", searchText="";
+    private boolean descending=true, selecting=false, dragSelecting=false;
+    private float pinchFactor=1f;
+    private int columns=4;
+    private long queryGeneration=0;
+    private final LinkedHashSet<String> pendingDelete=new LinkedHashSet<>();
 
-    static class MediaItem {
-        long id, date, size;
-        boolean video, trashed;
-        Uri uri;
-        MediaItem(long id,long date,long size,boolean video,boolean trashed,Uri uri) {
-            this.id=id; this.date=date; this.size=size; this.video=video; this.trashed=trashed; this.uri=uri;
+    private static final class MediaItem {
+        final long id, date, size;
+        final boolean video;
+        final Uri uri;
+        final String key;
+        MediaItem(long id,long date,long size,boolean video,Uri uri) {
+            this.id=id; this.date=date; this.size=size; this.video=video; this.uri=uri;
+            this.key=(video?"v:":"i:")+id;
         }
     }
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        getWindow().setStatusBarColor(Color.BLACK);
-        getWindow().setNavigationBarColor(Color.BLACK);
+        getWindow().setStatusBarColor(BLACK);
+        getWindow().setNavigationBarColor(BLACK);
         getWindow().getDecorView().setSystemUiVisibility(0);
-        buildUi();
-        loadTags();
-        if(hasAnyMediaPermission()) loadMedia(); else requestMedia();
+        buildInterface();
+        readCustomTags();
+        drawTabs();
+        if(hasMediaAccess()) refreshMedia(); else askMediaAccess();
     }
 
-    private boolean hasAnyMediaPermission() {
-        if(Build.VERSION.SDK_INT>=33) {
-            return checkSelfPermission(Manifest.permission.READ_MEDIA_IMAGES)==PackageManager.PERMISSION_GRANTED
-                || checkSelfPermission(Manifest.permission.READ_MEDIA_VIDEO)==PackageManager.PERMISSION_GRANTED
-                || (Build.VERSION.SDK_INT>=34 && checkSelfPermission(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)==PackageManager.PERMISSION_GRANTED);
-        }
-        return Build.VERSION.SDK_INT<23 || checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE)==PackageManager.PERMISSION_GRANTED;
+    private int dp(float n) { return (int)(n*getResources().getDisplayMetrics().density+0.5f); }
+    private boolean granted(String permission) {
+        return Build.VERSION.SDK_INT<23 || checkSelfPermission(permission)==PackageManager.PERMISSION_GRANTED;
     }
-
-    private void requestMedia() {
+    private boolean imagesAllowed() {
+        if(Build.VERSION.SDK_INT>=34) return granted(Manifest.permission.READ_MEDIA_IMAGES)
+            || granted(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED);
+        if(Build.VERSION.SDK_INT>=33) return granted(Manifest.permission.READ_MEDIA_IMAGES);
+        return granted(Manifest.permission.READ_EXTERNAL_STORAGE);
+    }
+    private boolean videosAllowed() {
+        if(Build.VERSION.SDK_INT>=34) return granted(Manifest.permission.READ_MEDIA_VIDEO)
+            || granted(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED);
+        if(Build.VERSION.SDK_INT>=33) return granted(Manifest.permission.READ_MEDIA_VIDEO);
+        return granted(Manifest.permission.READ_EXTERNAL_STORAGE);
+    }
+    private boolean hasMediaAccess() { return imagesAllowed() || videosAllowed(); }
+    private void askMediaAccess() {
         if(Build.VERSION.SDK_INT>=34) requestPermissions(new String[]{
-            Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO,
-            Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
-        },REQ_MEDIA);
+            Manifest.permission.READ_MEDIA_IMAGES,Manifest.permission.READ_MEDIA_VIDEO,
+            Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED},REQ_MEDIA);
         else if(Build.VERSION.SDK_INT>=33) requestPermissions(new String[]{
-            Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO
-        },REQ_MEDIA);
-        else if(Build.VERSION.SDK_INT>=23) requestPermissions(new String[]{Manifest.permission.READ_EXTERNAL_STORAGE},REQ_MEDIA);
+            Manifest.permission.READ_MEDIA_IMAGES,Manifest.permission.READ_MEDIA_VIDEO},REQ_MEDIA);
+        else if(Build.VERSION.SDK_INT>=23) requestPermissions(new String[]{
+            Manifest.permission.READ_EXTERNAL_STORAGE},REQ_MEDIA);
     }
-
     @Override public void onRequestPermissionsResult(int requestCode,String[] permissions,int[] results) {
         super.onRequestPermissionsResult(requestCode,permissions,results);
-        if(requestCode==REQ_MEDIA) loadMedia();
+        if(requestCode==REQ_MEDIA) refreshMedia();
     }
 
-    private int dp(float value) { return (int)(value*getResources().getDisplayMetrics().density+0.5f); }
-    private TextView text(String value,int size) {
-        TextView view=new TextView(this);
-        view.setText(value); view.setTextColor(WHITE); view.setTextSize(size);
-        view.setGravity(Gravity.CENTER); view.setPadding(dp(8),dp(7),dp(8),dp(7));
-        return view;
+    private TextView label(String value,int size) {
+        TextView t=new TextView(this);
+        t.setText(value); t.setTextColor(WHITE); t.setTextSize(size);
+        t.setGravity(Gravity.CENTER); t.setIncludeFontPadding(false);
+        t.setPadding(dp(5),dp(8),dp(5),dp(8));
+        return t;
     }
-    private LinearLayout row() {
-        LinearLayout view=new LinearLayout(this);
-        view.setOrientation(LinearLayout.HORIZONTAL);
-        view.setGravity(Gravity.CENTER_VERTICAL);
-        return view;
+    private LinearLayout horizontal() {
+        LinearLayout l=new LinearLayout(this);
+        l.setOrientation(LinearLayout.HORIZONTAL);
+        l.setGravity(Gravity.CENTER_VERTICAL);
+        return l;
     }
-
-    private void buildUi() {
-        root=new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); root.setBackgroundColor(Color.BLACK);
+    private void buildInterface() {
+        root=new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(BLACK);
         setContentView(root);
 
-        toolbar=row(); toolbar.setPadding(dp(8),dp(2),dp(8),dp(2));
-        root.addView(toolbar,new LinearLayout.LayoutParams(-1,dp(48)));
-        addTool("⌕",this::showSearch);
-        addTool("⇅",this::showSort);
-        addTool("▦",this::showColumns);
-        addTool("＋",this::showAddTag);
+        // The Android system status bar is the first persistent row.
+        toolRow=horizontal();
+        toolRow.setBackgroundColor(BLACK);
+        root.addView(toolRow,new LinearLayout.LayoutParams(-1,dp(48)));
+        addTool("⟳", "刷新", this::refreshMedia);
+        addTool(sortField, "排序字段", this::switchSortField);
+        addTool(descending?"↓":"↑", "排序方向", this::switchDirection);
 
-        tabs=row();
-        ScrollView tabScroll=new ScrollView(this);
+        tabScroll=new HorizontalScrollView(this);
         tabScroll.setHorizontalScrollBarEnabled(false);
-        tabScroll.addView(tabs);
-        root.addView(tabScroll,new LinearLayout.LayoutParams(-1,dp(43)));
-
-        LinearLayout controls=row();
-        controls.setPadding(dp(10),0,dp(10),0);
-        root.addView(controls,new LinearLayout.LayoutParams(-1,dp(34)));
-        TextView sort=text(sortLabel(),12);
-        sort.setGravity(Gravity.CENTER_VERTICAL|Gravity.LEFT);
-        controls.addView(sort,new LinearLayout.LayoutParams(0,-1,1));
-        sort.setOnClickListener(v->showSort());
-        TextView density=text(columns+"列",12);
-        controls.addView(density);
-        density.setOnClickListener(v->showColumns());
+        tabScroll.setFillViewport(false);
+        tabRow=horizontal();
+        tabScroll.addView(tabRow,new HorizontalScrollView.LayoutParams(-2,-1));
+        root.addView(tabScroll,new LinearLayout.LayoutParams(-1,dp(44)));
 
         grid=new GridView(this);
+        grid.setBackgroundColor(BLACK);
+        grid.setSelector(new ColorDrawable(Color.TRANSPARENT));
         grid.setNumColumns(columns);
         grid.setStretchMode(GridView.STRETCH_COLUMN_WIDTH);
         grid.setHorizontalSpacing(dp(2));
         grid.setVerticalSpacing(dp(2));
         grid.setPadding(dp(2),dp(2),dp(2),dp(2));
         grid.setClipToPadding(false);
-        grid.setBackgroundColor(Color.BLACK);
         root.addView(grid,new LinearLayout.LayoutParams(-1,0,1));
 
-        selectionBar=row();
-        selectionBar.setGravity(Gravity.CENTER);
-        selectionBar.setVisibility(View.GONE);
-        root.addView(selectionBar,new LinearLayout.LayoutParams(-1,dp(52)));
+        selectionRow=horizontal();
+        selectionRow.setGravity(Gravity.CENTER);
+        selectionRow.setVisibility(View.GONE);
+        root.addView(selectionRow,new LinearLayout.LayoutParams(-1,dp(48)));
 
         adapter=new MediaAdapter();
         grid.setAdapter(adapter);
         grid.setOnItemClickListener((parent,view,position,id)->{
-            if(position<0||position>=items.size()) return;
-            MediaItem item=items.get(position);
-            if(selecting) toggle(item.id); else openMedia(item);
+            if(position<0||position>=media.size()) return;
+            MediaItem item=media.get(position);
+            if(selecting) toggleSelection(item);
+            else openInSystemGallery(item);
         });
         grid.setOnItemLongClickListener((parent,view,position,id)->{
-            if(position>=0&&position<items.size()) {
-                selecting=true;
-                if(!selected.contains(items.get(position).id)) selected.add(items.get(position).id);
-                adapter.notifyDataSetChanged();
-                refreshSelectionBar();
+            if(position>=0&&position<media.size()) {
+                selecting=true; dragSelecting=true;
+                selected.add(media.get(position).key);
+                refreshSelectionBar(); adapter.notifyDataSetChanged();
             }
             return true;
         });
-        grid.setOnTouchListener((view,event)->{
-            if(event.getAction()==MotionEvent.ACTION_MOVE && selecting) {
-                int position=grid.pointToPosition((int)event.getX(),(int)event.getY());
-                if(position>=0&&position<items.size()) {
-                    long id=items.get(position).id;
-                    if(selected.add(id)) {
-                        adapter.notifyDataSetChanged();
-                        refreshSelectionBar();
-                    }
+        grid.setOnTouchListener((v,event)->{
+            scaleDetector.onTouchEvent(event);
+            if(event.getAction()==MotionEvent.ACTION_MOVE && selecting && dragSelecting) {
+                int p=grid.pointToPosition((int)event.getX(),(int)event.getY());
+                if(p>=0&&p<media.size()&&selected.add(media.get(p).key)) {
+                    adapter.notifyDataSetChanged(); refreshSelectionBar();
                 }
             }
+            if(event.getAction()==MotionEvent.ACTION_UP || event.getAction()==MotionEvent.ACTION_CANCEL) dragSelecting=false;
             return false;
         });
-        renderTabs();
-    }
-
-    private String sortLabel() {
-        return (sortMode.equals("添加时间")?"添加时间":"文件大小")+(sortDirection==0?" ↓":" ↑");
-    }
-    private void addTool(String glyph,Runnable action) {
-        TextView button=text(glyph,23);
-        toolbar.addView(button,new LinearLayout.LayoutParams(0,-1,1));
-        button.setOnClickListener(v->action.run());
-    }
-
-    private void loadTags() {
-        Set<String> stored=getSharedPreferences("tags",0).getStringSet("custom",new HashSet<>());
-        customTags.clear(); customTags.addAll(stored);
-    }
-    private void saveTags() {
-        getSharedPreferences("tags",0).edit().putStringSet("custom",new HashSet<>(customTags)).apply();
-    }
-    private void renderTabs() {
-        tabs.removeAllViews();
-        if(activeTag.equals("最近删除")) {
-            addTab("最近删除");
-            return;
-        }
-        for(String name:new String[]{"全部","视频","图片","最近删除"}) addTab(name);
-        for(String name:customTags) addTab(name);
-    }
-    private void addTab(String name) {
-        TextView tab=text(name,14);
-        tab.setTextColor(activeTag.equals(name)?WHITE:GRAY);
-        if(activeTag.equals(name)) tab.setTypeface(null,Typeface.BOLD);
-        tabs.addView(tab);
-        tab.setOnClickListener(v->{
-            activeTag=name;
-            selected.clear(); selecting=false;
-            refreshSelectionBar();
-            renderTabs();
-            loadMedia();
+        scaleDetector=new ScaleGestureDetector(this,new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            @Override public boolean onScale(ScaleGestureDetector detector) {
+                pinchFactor*=detector.getScaleFactor();
+                if(pinchFactor>1.32f) { changeColumns(1); pinchFactor=1f; }
+                else if(pinchFactor<0.76f) { changeColumns(-1); pinchFactor=1f; }
+                return true;
+            }
         });
     }
 
-    private void showAddTag() {
-        EditText input=new EditText(this);
-        input.setSingleLine(true); input.setHint("标签名称");
-        input.setTextColor(WHITE); input.setHintTextColor(GRAY);
-        new AlertDialog.Builder(this).setTitle("新增标签").setView(input)
-            .setNegativeButton("取消",null)
-            .setPositiveButton("添加",(dialog,which)->{
-                String name=input.getText().toString().trim();
-                if(!name.isEmpty()&&!Arrays.asList("全部","视频","图片","最近删除").contains(name)&&!customTags.contains(name)) {
-                    customTags.add(name); saveTags(); activeTag=name; renderTabs(); loadMedia();
-                }
-            }).show();
+    private void addTool(String initial,String description,Runnable action) {
+        TextView t=label(initial,16);
+        t.setContentDescription(description);
+        toolRow.addView(t,new LinearLayout.LayoutParams(0,-1,1f));
+        t.setOnClickListener(v->action.run());
+    }
+    private void updateToolText() {
+        ((TextView)toolRow.getChildAt(0)).setText("⟳");
+        ((TextView)toolRow.getChildAt(1)).setText(sortField);
+        ((TextView)toolRow.getChildAt(2)).setText(descending?"↓":"↑");
+        ((TextView)toolRow.getChildAt(1)).setTextSize(14);
+    }
+    private void switchSortField() {
+        sortField=sortField.equals("添加时间")?"媒体大小":"添加时间";
+        updateToolText(); refreshMedia();
+    }
+    private void switchDirection() { descending=!descending; updateToolText(); refreshMedia(); }
+    private void changeColumns(int delta) {
+        int index=columns==4?0:columns==8?1:2;
+        index=Math.max(0,Math.min(2,index+delta));
+        int next=new int[]{4,8,16}[index];
+        if(next==columns) return;
+        columns=next;
+        grid.setNumColumns(columns);
+        adapter.notifyDataSetChanged();
     }
 
-    private void showSort() {
-        new AlertDialog.Builder(this).setTitle("排序方式")
-            .setItems(new String[]{"添加时间：新到旧","添加时间：旧到新","大小：大到小","大小：小到大"},(dialog,which)->{
-                sortMode=which<2?"添加时间":"大小";
-                sortDirection=(which==1||which==3)?1:0;
-                updateControlsAndReload();
-            }).show();
+    private void readCustomTags() {
+        Set<String> saved=getSharedPreferences("tag_store",0).getStringSet("custom",new HashSet<>());
+        customTags.clear(); customTags.addAll(new LinkedHashSet<>(saved));
     }
-    private void showColumns() {
-        new AlertDialog.Builder(this).setTitle("每行数量")
-            .setItems(new String[]{"4 列","8 列","16 列"},(dialog,which)->{
-                columns=new int[]{4,8,16}[which];
-                grid.setNumColumns(columns);
-                updateControls();
-                adapter.notifyDataSetChanged();
-            }).show();
+    private void saveCustomTags() {
+        getSharedPreferences("tag_store",0).edit().putStringSet("custom",new HashSet<>(customTags)).apply();
     }
-    private void showSearch() {
-        EditText input=new EditText(this);
-        input.setSingleLine(true); input.setText(filterQuery); input.setHint("搜索媒体文件名");
-        new AlertDialog.Builder(this).setTitle("搜索媒体").setView(input)
-            .setNeutralButton("清除",(dialog,which)->{filterQuery="";loadMedia();})
-            .setNegativeButton("取消",null)
-            .setPositiveButton("搜索",(dialog,which)->{filterQuery=input.getText().toString().trim();loadMedia();})
-            .show();
-    }
-    private void updateControlsAndReload() { updateControls(); loadMedia(); }
-    private void updateControls() {
-        if(root.getChildCount()>2) {
-            LinearLayout controls=(LinearLayout)root.getChildAt(2);
-            TextView sort=(TextView)controls.getChildAt(0);
-            TextView density=(TextView)controls.getChildAt(1);
-            sort.setText(sortLabel()); density.setText(columns+"列");
+    private void drawTabs() {
+        tabRow.removeAllViews();
+        if(activeTag.equals("最近删除")) {
+            addTab("最近删除");
+        } else {
+            addTab("全部"); addTab("图片"); addTab("视频"); addTab("最近删除");
+            for(String tag:customTags) addTab(tag);
+            TextView add=label("＋",20);
+            tabRow.addView(add,new LinearLayout.LayoutParams(dp(48),-1));
+            add.setOnClickListener(v->addCustomTag());
         }
     }
+    private void addTab(String name) {
+        TextView t=label(name,14);
+        t.setTextColor(activeTag.equals(name)?WHITE:MUTED);
+        if(activeTag.equals(name)) t.setTypeface(null,Typeface.BOLD);
+        tabRow.addView(t,new LinearLayout.LayoutParams(-2,-1));
+        t.setOnClickListener(v->{
+            if(!activeTag.equals(name)) {
+                activeTag=name; clearSelection(); drawTabs(); refreshMedia();
+            }
+        });
+        if(customTags.contains(name)) t.setOnLongClickListener(v->{
+            new AlertDialog.Builder(this).setMessage("删除标签“"+name+"”？媒体文件不会被删除。")
+                .setNegativeButton("取消",null).setPositiveButton("删除",(d,w)->{
+                    customTags.remove(name); saveCustomTags();
+                    getSharedPreferences("tag_membership",0).edit().remove(name).apply();
+                    if(activeTag.equals(name)) activeTag="全部";
+                    drawTabs(); refreshMedia();
+                }).show();
+            return true;
+        });
+    }
+    private void addCustomTag() {
+        EditText input=new EditText(this);
+        input.setSingleLine(true); input.setTextColor(WHITE); input.setHintTextColor(MUTED);
+        input.setHint("标签名称");
+        new AlertDialog.Builder(this).setTitle("新增标签").setView(input)
+            .setNegativeButton("取消",null).setPositiveButton("添加",(d,w)->{
+                String name=input.getText().toString().trim();
+                if(name.isEmpty()||Arrays.asList("全部","图片","视频","最近删除").contains(name)||customTags.contains(name)) {
+                    Toast.makeText(this,"标签名称无效或已存在",Toast.LENGTH_SHORT).show(); return;
+                }
+                customTags.add(name); saveCustomTags(); activeTag=name; drawTabs(); refreshMedia();
+            }).show();
+    }
 
-    private void loadMedia() {
-        final String tag=activeTag, query=filterQuery, sort=sortMode;
-        final int direction=sortDirection;
-        executor.execute(()->{
-            ArrayList<MediaItem> result=new ArrayList<>();
-            if(Build.VERSION.SDK_INT>=23&&!hasAnyMediaPermission()) {
-                runOnUiThread(()->{items.clear();adapter.notifyDataSetChanged();});
+    private void refreshMedia() {
+        final long generation=++queryGeneration;
+        final String tag=activeTag, query=searchText, field=sortField;
+        final boolean desc=descending, allowImages=imagesAllowed(), allowVideos=videosAllowed();
+        worker.execute(()->{
+            ArrayList<MediaItem> found=new ArrayList<>();
+            if(!allowImages&&!allowVideos) {
+                runOnUiThread(()->{if(generation==queryGeneration){media.clear();adapter.notifyDataSetChanged();}});
                 return;
             }
-
-            Uri collection=MediaStore.Files.getContentUri("external");
-            String[] projection={
-                MediaStore.Files.FileColumns._ID,
-                MediaStore.Files.FileColumns.DATE_ADDED,
-                MediaStore.Files.FileColumns.SIZE,
-                MediaStore.Files.FileColumns.MEDIA_TYPE
-            };
-            StringBuilder selection=new StringBuilder(MediaStore.Files.FileColumns.MEDIA_TYPE+" IN (?,?)");
-            ArrayList<String> args=new ArrayList<>(Arrays.asList("1","3"));
-
-            if(customTags.contains(tag)) {
-                Set<String> tagIds=getSharedPreferences("media_tags",0).getStringSet(tag,new HashSet<>());
-                if(tagIds.isEmpty()) {
-                    runOnUiThread(()->{items.clear();adapter.notifyDataSetChanged();});
-                    return;
-                }
-                selection=new StringBuilder(MediaStore.Files.FileColumns._ID+" IN (");
-                args.clear();
-                int index=0;
-                for(String id:tagIds) {
-                    if(index++>0) selection.append(",");
-                    selection.append("?");
-                    args.add(id);
-                }
-                selection.append(") AND ").append(MediaStore.Files.FileColumns.MEDIA_TYPE).append(" IN (?,?)");
-                args.add("1"); args.add("3");
-            } else if(tag.equals("图片")) {
-                selection=new StringBuilder(MediaStore.Files.FileColumns.MEDIA_TYPE+"=?");
-                args.clear(); args.add("1");
-            } else if(tag.equals("视频")) {
-                selection=new StringBuilder(MediaStore.Files.FileColumns.MEDIA_TYPE+"=?");
-                args.clear(); args.add("3");
-            }
-
-            if(Build.VERSION.SDK_INT>=30) {
-                selection.append(" AND ").append(MediaStore.MediaColumns.IS_TRASHED).append("=0");
-            }
-
-            Set<String> appTrash=getSharedPreferences("app_trash",0).getStringSet("ids",new HashSet<>());
-            if(!query.isEmpty()) {
-                selection.append(" AND ").append(MediaStore.Files.FileColumns.DISPLAY_NAME).append(" LIKE ?");
-                args.add("%"+query+"%");
-            }
-
-            String order=(sort.equals("添加时间")?MediaStore.Files.FileColumns.DATE_ADDED:MediaStore.Files.FileColumns.SIZE)
-                +(direction==0?" DESC":" ASC");
-            try(Cursor cursor=getContentResolver().query(collection,projection,selection.toString(),args.toArray(new String[0]),order)) {
-                if(cursor!=null) while(cursor.moveToNext()) {
-                    long id=cursor.getLong(0), date=cursor.getLong(1), size=cursor.getLong(2);
-                    int type=cursor.getInt(3);
+            Uri files=MediaStore.Files.getContentUri("external");
+            String[] projection={MediaStore.Files.FileColumns._ID,MediaStore.Files.FileColumns.DATE_ADDED,
+                MediaStore.Files.FileColumns.SIZE,MediaStore.Files.FileColumns.MEDIA_TYPE,
+                MediaStore.Files.FileColumns.DISPLAY_NAME};
+            StringBuilder where=new StringBuilder("(");
+            ArrayList<String> args=new ArrayList<>();
+            if(allowImages) { where.append(MediaStore.Files.FileColumns.MEDIA_TYPE).append("=?"); args.add("1"); }
+            if(allowImages&&allowVideos) where.append(" OR ");
+            if(allowVideos) { where.append(MediaStore.Files.FileColumns.MEDIA_TYPE).append("=?"); args.add("3"); }
+            where.append(")");
+            if(tag.equals("图片")) where.append(" AND ").append(MediaStore.Files.FileColumns.MEDIA_TYPE).append("=1");
+            if(tag.equals("视频")) where.append(" AND ").append(MediaStore.Files.FileColumns.MEDIA_TYPE).append("=3");
+            if(Build.VERSION.SDK_INT>=30) where.append(" AND ").append(MediaStore.MediaColumns.IS_TRASHED).append("=0");
+            if(!query.isEmpty()) { where.append(" AND ").append(MediaStore.Files.FileColumns.DISPLAY_NAME).append(" LIKE ?"); args.add("%"+query+"%"); }
+            Set<String> trash=new HashSet<>(getSharedPreferences("app_trash",0).getStringSet("keys",new HashSet<>()));
+            Set<String> members=new HashSet<>(getSharedPreferences("tag_membership",0).getStringSet(tag,new HashSet<>()));
+            String order=(field.equals("媒体大小")?MediaStore.Files.FileColumns.SIZE:MediaStore.Files.FileColumns.DATE_ADDED)+(desc?" DESC":" ASC");
+            try(Cursor c=getContentResolver().query(files,projection,where.toString(),args.toArray(new String[0]),order)) {
+                if(c!=null) while(c.moveToNext()) {
+                    long id=c.getLong(0), date=c.getLong(1), size=c.getLong(2);
+                    int type=c.getInt(3);
                     boolean video=type==MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO;
-                    boolean trashed=appTrash.contains(String.valueOf(id));
-                    if(tag.equals("最近删除")!=trashed) continue;
-                    Uri uri=ContentUris.withAppendedId(video?MediaStore.Video.Media.EXTERNAL_CONTENT_URI:MediaStore.Images.Media.EXTERNAL_CONTENT_URI,id);
-                    result.add(new MediaItem(id,date,size,video,trashed,uri));
+                    Uri uri=Uri.withAppendedPath(video?MediaStore.Video.Media.EXTERNAL_CONTENT_URI:MediaStore.Images.Media.EXTERNAL_CONTENT_URI,String.valueOf(id));
+                    MediaItem item=new MediaItem(id,date,size,video,uri);
+                    boolean isTrash=trash.contains(item.key);
+                    if(tag.equals("最近删除")!=isTrash) continue;
+                    if(!tag.equals("全部")&&!tag.equals("图片")&&!tag.equals("视频")&&!tag.equals("最近删除")&&!members.contains(item.key)) continue;
+                    found.add(item);
                 }
-            } catch(Exception error) {
-                android.util.Log.e("MediaManager","Media query failed",error);
-            }
+            } catch(Exception e) { android.util.Log.e("chme","MediaStore query failed",e); }
             runOnUiThread(()->{
-                if(!tag.equals(activeTag)||!query.equals(filterQuery)) return;
-                items.clear(); items.addAll(result); adapter.notifyDataSetChanged();
+                if(generation!=queryGeneration) return;
+                media.clear(); media.addAll(found);
+                selected.retainAll(currentKeys());
+                adapter.notifyDataSetChanged(); refreshSelectionBar();
             });
         });
     }
+    private Set<String> currentKeys() {
+        HashSet<String> keys=new HashSet<>();
+        for(MediaItem item:media) keys.add(item.key);
+        return keys;
+    }
 
-    private void toggle(long id) {
-        if(selected.contains(id)) selected.remove(id); else selected.add(id);
+    private void toggleSelection(MediaItem item) {
+        if(!selected.add(item.key)) selected.remove(item.key);
         if(selected.isEmpty()) selecting=false;
-        adapter.notifyDataSetChanged();
+        adapter.notifyDataSetChanged(); refreshSelectionBar();
+    }
+    private void clearSelection() {
+        selected.clear(); selecting=false; dragSelecting=false;
         refreshSelectionBar();
     }
     private void refreshSelectionBar() {
-        selectionBar.removeAllViews();
-        selectionBar.setVisibility(selecting?View.VISIBLE:View.GONE);
+        selectionRow.removeAllViews();
+        selectionRow.setVisibility(selecting?View.VISIBLE:View.GONE);
         if(!selecting) return;
-        selectionBar.addView(text(selected.size()+" 已选择",13));
+        TextView count=label(selected.size()+" 已选",13); selectionRow.addView(count);
         if(activeTag.equals("最近删除")) {
-            TextView restore=text("恢复",13); selectionBar.addView(restore); restore.setOnClickListener(v->changeTrashState(false));
-            TextView permanent=text("永久删除",13); selectionBar.addView(permanent); permanent.setOnClickListener(v->permanentlyDelete());
+            TextView restore=label("恢复",13); selectionRow.addView(restore);
+            restore.setOnClickListener(v->updateTrash(false));
+            TextView delete=label("永久删除",13); selectionRow.addView(delete);
+            delete.setOnClickListener(v->permanentlyDelete());
         } else {
             if(!customTags.isEmpty()) {
-                TextView tag=text("加入标签",13); selectionBar.addView(tag); tag.setOnClickListener(v->assignSelectedTag());
+                TextView tag=label("加入标签",13); selectionRow.addView(tag);
+                tag.setOnClickListener(v->addSelectionToTag());
             }
-            TextView trash=text("移入最近删除",13); selectionBar.addView(trash); trash.setOnClickListener(v->changeTrashState(true));
+            TextView trash=label("最近删除",13); selectionRow.addView(trash);
+            trash.setOnClickListener(v->updateTrash(true));
         }
-        TextView cancel=text("取消",13); selectionBar.addView(cancel);
-        cancel.setOnClickListener(v->{selected.clear();selecting=false;adapter.notifyDataSetChanged();refreshSelectionBar();});
+        TextView cancel=label("取消",13); selectionRow.addView(cancel);
+        cancel.setOnClickListener(v->{clearSelection();adapter.notifyDataSetChanged();});
     }
-
-    private void assignSelectedTag() {
+    private void addSelectionToTag() {
         new AlertDialog.Builder(this).setTitle("添加到标签")
-            .setItems(customTags.toArray(new String[0]),(dialog,which)->{
-                String tag=customTags.get(which);
-                Set<String> ids=new HashSet<>(getSharedPreferences("media_tags",0).getStringSet(tag,new HashSet<>()));
-                for(Long id:selected) ids.add(String.valueOf(id));
-                getSharedPreferences("media_tags",0).edit().putStringSet(tag,ids).apply();
-                selected.clear(); selecting=false; refreshSelectionBar();
-                Toast.makeText(this,"已添加到 "+tag,Toast.LENGTH_SHORT).show();
+            .setItems(customTags.toArray(new String[0]),(d,index)->{
+                String tag=customTags.get(index);
+                Set<String> members=new HashSet<>(getSharedPreferences("tag_membership",0).getStringSet(tag,new HashSet<>()));
+                members.addAll(selected);
+                getSharedPreferences("tag_membership",0).edit().putStringSet(tag,members).apply();
+                clearSelection(); Toast.makeText(this,"已加入 "+tag,Toast.LENGTH_SHORT).show();
             }).show();
     }
-
-    private ArrayList<Uri> selectedUris() {
-        ArrayList<Uri> uris=new ArrayList<>();
-        for(MediaItem item:items) if(selected.contains(item.id)) uris.add(item.uri);
-        return uris;
+    private void updateTrash(boolean value) {
+        Set<String> keys=new HashSet<>(getSharedPreferences("app_trash",0).getStringSet("keys",new HashSet<>()));
+        if(value) keys.addAll(selected); else keys.removeAll(selected);
+        getSharedPreferences("app_trash",0).edit().putStringSet("keys",keys).apply();
+        clearSelection(); refreshMedia();
     }
-    private void changeTrashState(boolean trash) {
-        android.content.SharedPreferences prefs=getSharedPreferences("app_trash",0);
-        Set<String> ids=new HashSet<>(prefs.getStringSet("ids",new HashSet<>()));
-        for(Long id:selected) {
-            if(trash) ids.add(String.valueOf(id)); else ids.remove(String.valueOf(id));
-        }
-        prefs.edit().putStringSet("ids",ids).apply();
-        selected.clear(); selecting=false; refreshSelectionBar(); loadMedia();
-    }
-
     private void permanentlyDelete() {
-        ArrayList<Uri> uris=selectedUris();
+        ArrayList<Uri> uris=new ArrayList<>();
+        for(MediaItem item:media) if(selected.contains(item.key)) uris.add(item.uri);
         if(uris.isEmpty()) return;
-        pendingDeleteIds.clear();
-        for(Long id:selected) pendingDeleteIds.add(String.valueOf(id));
         if(Build.VERSION.SDK_INT>=30) {
-            try { IntentSenderRequestCompat.launch(this,MediaStore.createDeleteRequest(getContentResolver(),uris),REQ_DELETE); }
-            catch(Exception error) { pendingDeleteIds.clear(); Toast.makeText(this,"无法发起删除授权："+error.getMessage(),Toast.LENGTH_LONG).show(); }
-        } else {
-            Toast.makeText(this,"Android 10 及更早版本的永久删除授权尚未实现",Toast.LENGTH_LONG).show();
-            pendingDeleteIds.clear();
-        }
+            try {
+                pendingDelete.clear(); pendingDelete.addAll(selected);
+                startIntentSenderForResult(MediaStore.createDeleteRequest(getContentResolver(),uris).getIntentSender(),
+                    REQ_DELETE,null,0,0,0);
+            } catch(Exception e) { Toast.makeText(this,"无法请求系统删除授权",Toast.LENGTH_SHORT).show(); }
+        } else Toast.makeText(this,"当前 Android 版本暂不支持此删除流程",Toast.LENGTH_SHORT).show();
     }
-
     @Override protected void onActivityResult(int requestCode,int resultCode,Intent data) {
         super.onActivityResult(requestCode,resultCode,data);
         if(requestCode==REQ_DELETE) {
             if(resultCode==RESULT_OK) {
-                android.content.SharedPreferences trashPrefs=getSharedPreferences("app_trash",0);
-                Set<String> ids=new HashSet<>(trashPrefs.getStringSet("ids",new HashSet<>()));
-                ids.removeAll(pendingDeleteIds);
-                trashPrefs.edit().putStringSet("ids",ids).apply();
-                android.content.SharedPreferences tagPrefs=getSharedPreferences("media_tags",0);
-                android.content.SharedPreferences.Editor editor=tagPrefs.edit();
+                Set<String> trash=new HashSet<>(getSharedPreferences("app_trash",0).getStringSet("keys",new HashSet<>()));
+                trash.removeAll(pendingDelete);
+                getSharedPreferences("app_trash",0).edit().putStringSet("keys",trash).apply();
                 for(String tag:customTags) {
-                    Set<String> tagIds=new HashSet<>(tagPrefs.getStringSet(tag,new HashSet<>()));
-                    tagIds.removeAll(pendingDeleteIds);
-                    editor.putStringSet(tag,tagIds);
+                    Set<String> members=new HashSet<>(getSharedPreferences("tag_membership",0).getStringSet(tag,new HashSet<>()));
+                    members.removeAll(pendingDelete);
+                    getSharedPreferences("tag_membership",0).edit().putStringSet(tag,members).apply();
                 }
-                editor.apply();
             }
-            pendingDeleteIds.clear();
-            selected.clear(); selecting=false; refreshSelectionBar(); loadMedia();
+            pendingDelete.clear(); clearSelection(); refreshMedia();
         }
     }
 
-    private void openMedia(MediaItem item) {
+    private void openInSystemGallery(MediaItem item) {
         try {
-            Intent intent=new Intent(this,MediaViewerActivity.class);
-            intent.putExtra("media_uri",item.uri.toString());
-            intent.putExtra("media_video",item.video);
+            String mime=item.video?"video/*":"image/*";
+            Intent intent=new Intent(Intent.ACTION_VIEW);
+            intent.setDataAndType(item.uri,mime);
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             startActivity(intent);
-            overridePendingTransition(0,0);
-        } catch(Exception error) {
-            Toast.makeText(this,"无法打开媒体文件",Toast.LENGTH_SHORT).show();
+        } catch(Exception e) {
+            Toast.makeText(this,"系统没有可打开此媒体的相册或查看器",Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private class MediaAdapter extends BaseAdapter {
+        @Override public int getCount(){return media.size();}
+        @Override public Object getItem(int p){return media.get(p);}
+        @Override public long getItemId(int p){return media.get(p).id;}
+        @Override public View getView(int position,View recycled,ViewGroup parent) {
+            FrameLayout cell=recycled instanceof FrameLayout?(FrameLayout)recycled:new FrameLayout(MainActivity.this);
+            cell.removeAllViews();
+            MediaItem item=media.get(position);
+            ImageView thumb=new ImageView(MainActivity.this);
+            thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            cell.addView(thumb,new FrameLayout.LayoutParams(-1,-1));
+            try {
+                if(Build.VERSION.SDK_INT>=29) thumb.setImageBitmap(getContentResolver().loadThumbnail(item.uri,new Size(240,240),null));
+                else thumb.setImageURI(item.uri);
+            } catch(Exception e) { thumb.setBackgroundColor(0xff171717); }
+            if(item.video) {
+                TextView marker=label("▶",10); marker.setBackgroundColor(0x66000000);
+                cell.addView(marker,new FrameLayout.LayoutParams(dp(26),dp(26),Gravity.RIGHT|Gravity.BOTTOM));
+            }
+            if(selected.contains(item.key)) {
+                View shade=new View(MainActivity.this); shade.setBackgroundColor(0x66000000);
+                cell.addView(shade,new FrameLayout.LayoutParams(-1,-1));
+                TextView check=label("✓",18); cell.addView(check,new FrameLayout.LayoutParams(-1,-1));
+            }
+            int width=getResources().getDisplayMetrics().widthPixels;
+            int cellWidth=(width-dp(4)-(columns-1)*dp(2))/columns;
+            cell.setLayoutParams(new AbsListView.LayoutParams(-1,cellWidth));
+            return cell;
         }
     }
 
     @Override public void onBackPressed() {
-        if(selecting) {
-            selected.clear(); selecting=false; adapter.notifyDataSetChanged(); refreshSelectionBar();
-        } else if(!activeTag.equals("全部")) {
-            activeTag="全部"; renderTabs(); loadMedia();
-        } else super.onBackPressed();
+        if(selecting) { clearSelection(); adapter.notifyDataSetChanged(); }
+        else if(!activeTag.equals("全部")) { activeTag="全部"; drawTabs(); refreshMedia(); }
+        else super.onBackPressed();
     }
-
-    private static class IntentSenderRequestCompat {
-        static void launch(Activity activity,android.app.PendingIntent pendingIntent,int requestCode) throws Exception {
-            if(Build.VERSION.SDK_INT>=30) activity.startIntentSenderForResult(
-                pendingIntent.getIntentSender(),requestCode,null,0,0,0);
-        }
-    }
-
-    private class SquareFrame extends FrameLayout {
-        SquareFrame() { super(MainActivity.this); }
-        @Override protected void onMeasure(int widthMeasureSpec,int heightMeasureSpec) {
-            int width=MeasureSpec.getSize(widthMeasureSpec);
-            super.onMeasure(MeasureSpec.makeMeasureSpec(width,MeasureSpec.EXACTLY),MeasureSpec.makeMeasureSpec(width,MeasureSpec.EXACTLY));
-        }
-    }
-
-    class MediaAdapter extends BaseAdapter {
-        @Override public int getCount() { return items.size(); }
-        @Override public Object getItem(int position) { return items.get(position); }
-        @Override public long getItemId(int position) { return items.get(position).id; }
-        @Override public View getView(int position,View convertView,ViewGroup parent) {
-            SquareFrame frame=convertView instanceof SquareFrame?(SquareFrame)convertView:new SquareFrame();
-            frame.removeAllViews();
-            MediaItem item=items.get(position);
-            ImageView image=new ImageView(MainActivity.this);
-            image.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            frame.addView(image,new FrameLayout.LayoutParams(-1,-1));
-            try {
-                if(Build.VERSION.SDK_INT>=29) image.setImageBitmap(getContentResolver().loadThumbnail(item.uri,new android.util.Size(256,256),null));
-                else image.setImageURI(item.uri);
-            } catch(Exception error) { image.setBackgroundColor(0xff202020); }
-            if(item.video) {
-                TextView play=text("▶",12); play.setBackgroundColor(0x55000000);
-                frame.addView(play,new FrameLayout.LayoutParams(dp(28),dp(28),Gravity.BOTTOM|Gravity.RIGHT));
-            }
-            if(selected.contains(item.id)) {
-                View shade=new View(MainActivity.this); shade.setBackgroundColor(0x66000000);
-                frame.addView(shade,new FrameLayout.LayoutParams(-1,-1));
-                TextView check=text("✓",18); frame.addView(check,new FrameLayout.LayoutParams(-1,-1));
-            }
-            return frame;
-        }
+    @Override protected void onDestroy() {
+        super.onDestroy();
+        worker.shutdownNow();
     }
 }
