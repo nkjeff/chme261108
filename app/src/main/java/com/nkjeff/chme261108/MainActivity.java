@@ -33,6 +33,7 @@ public class MainActivity extends Activity {
     private final ArrayList<String> customTags=new ArrayList<>();
     private String activeTag="全部";
     private String sortMode="添加时间";
+    private String filterQuery="";
     private int columns=4;
     private boolean selecting=false, dragging=false;
     private float downX, downY;
@@ -100,7 +101,7 @@ public class MainActivity extends Activity {
     private void showSort(){new AlertDialog.Builder(this).setTitle("排序方式").setItems(new String[]{"添加时间：新到旧","添加时间：旧到新","大小：大到小","大小：小到大"},(d,w)->{sortMode=w<2?"添加时间":"大小";sortDirection=(w==1||w==3)?1:0;loadMedia();}).show();}
     private int sortDirection=0;
     private void showColumns(){new AlertDialog.Builder(this).setTitle("每行数量").setItems(new String[]{"4 列","8 列","16 列"},(d,w)->{columns=new int[]{4,8,16}[w];grid.setNumColumns(columns);adapter.notifyDataSetChanged();}).show();}
-    private void showSearch(){EditText e=new EditText(this);e.setSingleLine();e.setHint("搜索媒体文件名");new AlertDialog.Builder(this).setTitle("搜索").setView(e).setNegativeButton("关闭",null).setPositiveButton("搜索",(d,w)->{String q=e.getText().toString().trim().toLowerCase(Locale.ROOT);if(q.isEmpty())return;Toast.makeText(this,"搜索将在下一版完善",Toast.LENGTH_SHORT).show();}).show();}
+    private void showSearch(){EditText e=new EditText(this);e.setSingleLine();e.setText(filterQuery);e.setHint("搜索媒体文件名");new AlertDialog.Builder(this).setTitle("搜索").setView(e).setNegativeButton("清除",(d,w)->{filterQuery="";loadMedia();}).setPositiveButton("搜索",(d,w)->{filterQuery=e.getText().toString().trim();loadMedia();}).show();}
     private void loadMedia(){
         executor.execute(()->{
             ArrayList<MediaItem> result=new ArrayList<>();
@@ -109,9 +110,10 @@ public class MainActivity extends Activity {
             String[] projection={MediaStore.Files.FileColumns._ID,MediaStore.Files.FileColumns.DATE_ADDED,MediaStore.Files.FileColumns.SIZE,MediaStore.Files.FileColumns.MEDIA_TYPE,MediaStore.Files.FileColumns.DISPLAY_NAME};
             StringBuilder where=new StringBuilder(MediaStore.Files.FileColumns.MEDIA_TYPE+" IN (?,?)");
             ArrayList<String> args=new ArrayList<>(Arrays.asList("1","3"));
-            if(customTags.contains(activeTag)){Set<String> ids=getSharedPreferences("media_tags",0).getStringSet(activeTag,new HashSet<>());if(ids.isEmpty()){runOnUiThread(()->{items.clear();adapter.notifyDataSetChanged();});return;}where=new StringBuilder(MediaStore.Files.FileColumns._ID+" IN (");for(int j=0;j<ids.size();j++){if(j>0)where.append(",");where.append("?");args.add(ids.toArray(new String[0])[j]);}where.append(") AND ").append(MediaStore.Files.FileColumns.MEDIA_TYPE+" IN (?,?)");args.add("1");args.add("3");}\n            if(activeTag.equals("图片")){where=new StringBuilder(MediaStore.Files.FileColumns.MEDIA_TYPE+"=?");args.clear();args.add("1");}
+            if(customTags.contains(activeTag)){args.clear();Set<String> ids=getSharedPreferences("media_tags",0).getStringSet(activeTag,new HashSet<>());if(ids.isEmpty()){runOnUiThread(()->{items.clear();adapter.notifyDataSetChanged();});return;}where=new StringBuilder(MediaStore.Files.FileColumns._ID+" IN (");for(int j=0;j<ids.size();j++){if(j>0)where.append(",");where.append("?");args.add(ids.toArray(new String[0])[j]);}where.append(") AND ").append(MediaStore.Files.FileColumns.MEDIA_TYPE+" IN (?,?)");args.add("1");args.add("3");}\n            if(activeTag.equals("图片")){where=new StringBuilder(MediaStore.Files.FileColumns.MEDIA_TYPE+"=?");args.clear();args.add("1");}
             if(activeTag.equals("视频")){where=new StringBuilder(MediaStore.Files.FileColumns.MEDIA_TYPE+"=?");args.clear();args.add("3");}
             if(Build.VERSION.SDK_INT>=30){where.append(" AND ").append(MediaStore.MediaColumns.IS_TRASHED).append("=?");args.add(activeTag.equals("最近删除")?"1":"0");}
+            if(!filterQuery.isEmpty()){where.append(" AND ").append(MediaStore.Files.FileColumns.DISPLAY_NAME).append(" LIKE ?");args.add("%"+filterQuery+"%");}
             else if(activeTag.equals("最近删除")){runOnUiThread(()->{items.clear();adapter.notifyDataSetChanged();});return;}
             String order=(sortMode.equals("添加时间")?MediaStore.Files.FileColumns.DATE_ADDED:MediaStore.Files.FileColumns.SIZE)+(sortDirection==1?" ASC":" DESC");
             try(Cursor c=getContentResolver().query(base,projection,where.toString(),args.toArray(new String[0]),order)){
