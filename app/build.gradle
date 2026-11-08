@@ -7,7 +7,7 @@ android {
         applicationId 'com.nkjeff.chme261108'
         minSdk 26
         targetSdk 34
-        versionCode 1
-        versionName '0.1.0-20261108170500'
+        versionCode 20261108
+        versionName '0.1.0-20261108170422'
     }
 }
